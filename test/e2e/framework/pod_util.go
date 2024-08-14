@@ -88,6 +88,21 @@ func (j *PVCTestJig) CheckFileExists(namespace string, podName string, dir strin
 	}
 }
 
+func (j *PVCTestJig) CheckDataInBlockDevice(namespace string, podName string, fileName string) {
+	By("check if the block device has data")
+	command := "dd if=/dev/xvda bs=2048 count=1 status=none"
+	if pollErr := wait.PollImmediate(K8sResourcePoll, DefaultTimeout, func() (bool, error) {
+		stdout, err := RunHostCmd(namespace, podName, command)
+		if err != nil {
+			Logf("got err: %v, retry until timeout", err)
+			return false, nil
+		}
+		return strings.Contains(stdout, fileName), nil
+	}); pollErr != nil {
+		Failf("File does not exist in pod '%v'", podName)
+	}
+}
+
 func (j *PVCTestJig) CheckMountOptions(namespace string, podName string, expectedPath string, expectedOptions []string) {
 	By("check if NFS mount options are applied")
 	command := fmt.Sprintf("mount -t nfs")
@@ -108,6 +123,21 @@ func (j *PVCTestJig) CheckMountOptions(namespace string, podName string, expecte
 		return true, nil
 	}); pollErr != nil {
 		Failf("NFS mount with Mount Options failed in pod '%v'", podName)
+	}
+}
+
+func (j *PVCTestJig) ExtractDataFromBlockDevice(namespace string, podName string, devicePath string, outFile string) {
+	By("extract data from block device")
+	command := fmt.Sprintf("dd if=%s count=1 | tr -d '\\000' > %s", devicePath, outFile)
+	if pollErr := wait.PollImmediate(K8sResourcePoll, DefaultTimeout, func() (bool, error) {
+		_, err := RunHostCmd(namespace, podName, command)
+		if err != nil {
+			Logf("got err: %v, retry until timeout", err)
+			return false, nil
+		}
+		return true, nil
+	}); pollErr != nil {
+		Failf("File does not exist in pod '%v'", podName)
 	}
 }
 
@@ -199,6 +229,23 @@ func (j *PVCTestJig) CheckExpandedVolumeReadWrite(namespace string, podName stri
 
 }
 
+// CheckExpandedRawBlockVolumeReadWrite checks a pvc expanded pod with a dymincally provisioned raw block volume
+func (j *PVCTestJig) CheckExpandedRawBlockVolumeReadWrite(namespace string, podName string) {
+	text := fmt.Sprintf("Hello New World")
+	command := fmt.Sprintf("echo '%s' > /tmp/test.txt; dd if=/tmp/test.txt of=/dev/xvda count=1; dd if=/dev/xvda bs=512 count=1", text)
+
+	if pollErr := wait.PollImmediate(K8sResourcePoll, DefaultTimeout, func() (bool, error) {
+		stdout, err := RunHostCmd(namespace, podName, command)
+		if err != nil {
+			Logf("got err: %v, retry until timeout", err)
+			return false, nil
+		}
+		return strings.Contains(stdout, text), nil
+	}); pollErr != nil {
+		Failf("Write Test failed in pod '%v' after expanding pvc", podName)
+	}
+}
+
 // CheckUsableVolumeSizeInsidePod checks a pvc expanded pod with a dymincally provisioned volume
 func (j *PVCTestJig) CheckUsableVolumeSizeInsidePod(namespace string, podName string, capacity string) {
 
@@ -220,6 +267,26 @@ func (j *PVCTestJig) CheckUsableVolumeSizeInsidePod(namespace string, podName st
 		Failf("Check Usable Volume Size Inside Pod Test failed in pod '%v' after expanding pvc", podName)
 	}
 
+}
+
+// CheckUsableVolumeSizeInsidePodBlock checks a pvc expanded pod with a dymincally provisioned volume
+func (j *PVCTestJig) CheckUsableVolumeSizeInsidePodBlock(namespace string, podName string, capacity string) {
+	command := fmt.Sprintf("fdisk -l /dev/xvda")
+	if pollErr := wait.PollImmediate(K8sResourcePoll, DefaultTimeout, func() (bool, error) {
+		stdout, err := RunHostCmd(namespace, podName, command)
+		if err != nil {
+			Logf("got err: %v, retry until timeout", err)
+			return false, nil
+		}
+		if strings.Fields(strings.TrimSpace(stdout))[2] != capacity {
+			Logf("Expected capacity: %v, got capacity: %v", capacity, strings.Fields(strings.TrimSpace(stdout))[1])
+			return false, nil
+		} else {
+			return true, nil
+		}
+	}); pollErr != nil {
+		Failf("Check Usable Volume Size Inside Pod Test failed in pod '%v' after expanding pvc", podName)
+	}
 }
 
 // CheckFilesystemTypeOfVolumeInsidePod Checks the volume is provisioned with FsType as requested
@@ -269,6 +336,66 @@ func (j *PVCTestJig) CreateAndAwaitNginxPodOrFail(ns string, pvc *v1.PersistentV
 						{
 							Name:      "nginx-storage",
 							MountPath: "/usr/share/nginx/html/",
+						},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: "nginx-storage",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							ClaimName: pvc.Name,
+						},
+					},
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		Failf("Pod %q Create API error: %v", pod.Name, err)
+	}
+
+	// Waiting for pod to be running
+	err = j.waitTimeoutForPodRunningInNamespace(pod.Name, ns, slowPodStartTimeout)
+	if err != nil {
+		Failf("Pod %q is not Running: %v", pod.Name, err)
+	}
+	return pod.Name
+}
+
+func (j *PVCTestJig) CreateAndAwaitNginxPodOrFailBlock(ns string, pvc *v1.PersistentVolumeClaim, command string) string {
+	By("Creating a pod (with Raw Block Volume) with the claiming PVC created by CSI")
+	fsGroup := int64(1000)
+	pod, err := j.KubeClient.CoreV1().Pods(ns).Create(context.Background(), &v1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "pvc-pod-tester-" + pvc.Labels["testID"],
+			Namespace:    ns,
+		},
+		Spec: v1.PodSpec{
+			SecurityContext: &v1.PodSecurityContext{
+				FSGroup: &fsGroup,
+			},
+			Containers: []v1.Container{
+				{
+					Name:  "write-pod",
+					Image: nginx,
+					Ports: []v1.ContainerPort{
+						{
+							Name:          "http-server",
+							ContainerPort: 80,
+						},
+					},
+					Command: []string{"/bin/sh"},
+					Args:    []string{"-c", command},
+					VolumeDevices: []v1.VolumeDevice{
+						{
+							Name:       "nginx-storage",
+							DevicePath: "/dev/xvda",
 						},
 					},
 				},

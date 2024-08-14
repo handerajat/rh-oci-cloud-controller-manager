@@ -873,21 +873,31 @@ func TestControllerDriver_CreateVolume(t *testing.T) {
 			wantErr: errors.New("required in PreferredTopologies or allowedTopologies"),
 		},
 		{
-			name:   "Error for unsupported volumeMode Block",
+			name:   "Error when ultra high performance volume is chosen with block mode",
 			fields: fields{},
 			args: args{
 				ctx: nil,
 				req: &csi.CreateVolumeRequest{
 					Name: "ut-volume",
-					VolumeCapabilities: []*csi.VolumeCapability{{
-						AccessType: &csi.VolumeCapability_Block{
-							Block: &csi.VolumeCapability_BlockVolume{},
-						},
-					}},
+					VolumeCapabilities: []*csi.VolumeCapability{
+						{
+							AccessMode: &csi.VolumeCapability_AccessMode{
+								Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+							},
+							AccessType: &csi.VolumeCapability_Block{
+								Block: &csi.VolumeCapability_BlockVolume{},
+							},
+						}},
+					Parameters: map[string]string{
+						"vpusPerGB": "40",
+					},
+					CapacityRange: &csi.CapacityRange{
+						RequiredBytes: int64(csi_util.MaximumVolumeSizeInBytes),
+					},
 				},
 			},
 			want:    nil,
-			wantErr: errors.New("driver does not support Block volumeMode. Please use Filesystem mode"),
+			wantErr: errors.New("driver does not support Block volumeMode for Ultra High Performance Volumes (vpusPerGB > 30)"),
 		},
 		{
 			name:   "Create Volume times out waiting for volume to become available",

@@ -85,6 +85,10 @@ func (c *iSCSIUHPMounter) SetAutomaticLogin() error {
 	return nil
 }
 
+func (c *iSCSIUHPMounter) UnmountDeviceBindAndDelete(path string) error {
+	return UnmountFileAndDelete(c.logger, path, c.mounter)
+}
+
 func (c *iSCSIUHPMounter) UnmountPath(path string) error {
 	return UnmountPath(c.logger, path, c.mounter)
 }

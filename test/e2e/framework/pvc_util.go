@@ -229,11 +229,14 @@ func (j *PVCTestJig) newPVCTemplateDynamicFSS(namespace, volumeSize, scName stri
 // newPVCTemplateSnapshotRestore returns the default template for this jig, but
 // does not actually create the PVC.  The default PVC has the same name
 // as the jig
-func (j *PVCTestJig) newPVCTemplateSnapshotSource(namespace, volumeSize, scName string, vsName string) *v1.PersistentVolumeClaim {
+func (j *PVCTestJig) newPVCTemplateSnapshotSource(namespace, volumeSize, scName string, vsName string, isRawBlockVolume bool) *v1.PersistentVolumeClaim {
 	pvc := j.CreatePVCTemplate(namespace, volumeSize)
 	pvc = j.pvcAddAccessMode(pvc, v1.ReadWriteOnce)
 	pvc = j.pvcAddStorageClassName(pvc, scName)
 	pvc = j.pvcAddDataSource(pvc, vsName)
+	if isRawBlockVolume {
+		pvc = j.pvcAddVolumeMode(pvc, v1.PersistentVolumeBlock)
+	}
 	return pvc
 }
 
@@ -325,9 +328,9 @@ func (j *PVCTestJig) CreatePVCorFailDynamicFSS(namespace, volumeSize string, scN
 // CreatePVCorFailSnapshotSource creates a new claim based on the jig's
 // defaults. Callers can provide a function to tweak the claim object
 // before it is created.
-func (j *PVCTestJig) CreatePVCorFailSnapshotSource(namespace, volumeSize string, scName string, vsName string,
+func (j *PVCTestJig) CreatePVCorFailSnapshotSource(namespace, volumeSize string, scName string, vsName string, isRawBlockVolume bool,
 	tweak func(pvc *v1.PersistentVolumeClaim)) *v1.PersistentVolumeClaim {
-	pvc := j.newPVCTemplateSnapshotSource(namespace, volumeSize, scName, vsName)
+	pvc := j.newPVCTemplateSnapshotSource(namespace, volumeSize, scName, vsName, isRawBlockVolume)
 	return j.CheckPVCorFail(pvc, tweak, namespace, volumeSize)
 }
 
@@ -404,13 +407,19 @@ func (j *PVCTestJig) CreateAndAwaitPVCOrFailDynamicFSS(namespace, volumeSize, sc
 	return j.CheckAndAwaitPVCOrFail(pvc, namespace, phase)
 }
 
+func (j *PVCTestJig) CreateAndAwaitPVCOrFailSnapshotSourceBlock(namespace, volumeSize, scName string,
+	vsName string, phase v1.PersistentVolumeClaimPhase, tweak func(pvc *v1.PersistentVolumeClaim)) *v1.PersistentVolumeClaim {
+	pvc := j.CreatePVCorFailSnapshotSource(namespace, volumeSize, scName, vsName, true, tweak)
+	return j.CheckAndAwaitPVCOrFail(pvc, namespace, phase)
+}
+
 // CreateAndAwaitPVCOrFailSnapshotSource creates a new PVC based on the
 // jig's defaults, waits for it to become ready, and then sanity checks it and
 // its dependant resources. Callers can provide a function to tweak the
 // PVC object before it is created.
 func (j *PVCTestJig) CreateAndAwaitPVCOrFailSnapshotSource(namespace, volumeSize, scName string,
 	vsName string, phase v1.PersistentVolumeClaimPhase, tweak func(pvc *v1.PersistentVolumeClaim)) *v1.PersistentVolumeClaim {
-	pvc := j.CreatePVCorFailSnapshotSource(namespace, volumeSize, scName, vsName, tweak)
+	pvc := j.CreatePVCorFailSnapshotSource(namespace, volumeSize, scName, vsName, false, tweak)
 	return j.CheckAndAwaitPVCOrFail(pvc, namespace, phase)
 }
 
@@ -689,6 +698,63 @@ func (j *PVCTestJig) NewPodForCSI(name string, namespace string, claimName strin
 
 // newPODTemplate returns the default template for this jig,
 // creates the Pod. Attaches PVC to the Pod which is created by CSI
+func (j *PVCTestJig) NewPodForCSIBlock(name string, namespace string, claimName string, adLabel string) string {
+	By("Creating a pod with the claiming PVC created by CSI")
+
+	pod, err := j.KubeClient.CoreV1().Pods(namespace).Create(context.Background(), &v1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: j.Name,
+			Namespace:    namespace,
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:    name,
+					Image:   "busybox",
+					Command: []string{"/bin/sh"},
+					Args:    []string{"-c", "echo 'Hello World' > /tmp/test.txt; dd if=/tmp/test.txt of=/dev/xvda count=1; while true; do sleep 5; done"},
+					VolumeDevices: []v1.VolumeDevice{
+						{
+							Name:       "persistent-storage",
+							DevicePath: "/dev/xvda",
+						},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: "persistent-storage",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							ClaimName: claimName,
+						},
+					},
+				},
+			},
+			NodeSelector: map[string]string{
+				v1.LabelTopologyZone: adLabel,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		Failf("Pod %q Create API error: %v", pod.Name, err)
+	}
+
+	// Waiting for pod to be running
+	err = j.waitTimeoutForPodRunningInNamespace(pod.Name, namespace, slowPodStartTimeout)
+	if err != nil {
+		Failf("Pod %q is not Running: %v", pod.Name, err)
+	}
+	zap.S().With(pod.Namespace).With(pod.Name).Info("CSI POD is created.")
+	return pod.Name
+}
+
+// newPODTemplate returns the default template for this jig,
+// creates the Pod. Attaches PVC to the Pod which is created by CSI
 func (j *PVCTestJig) NewPodWithLabels(name string, namespace string, claimName string, labels map[string]string) string {
 	By("Creating a pod with the claiming PVC created by CSI")
 
@@ -763,6 +829,59 @@ func (j *PVCTestJig) NewPodForCSIClone(name string, namespace string, claimName 
 						{
 							Name:      "persistent-storage",
 							MountPath: "/data",
+						},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: "persistent-storage",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							ClaimName: claimName,
+						},
+					},
+				},
+			},
+			NodeSelector: map[string]string{
+				v1.LabelTopologyZone: adLabel,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		Failf("Pod %q Create API error: %v", pod.Name, err)
+	}
+
+	// Waiting for pod to be running
+	err = j.waitTimeoutForPodRunningInNamespace(pod.Name, namespace, slowPodStartTimeout)
+	if err != nil {
+		Failf("Pod %q is not Running: %v", pod.Name, err)
+	}
+	zap.S().With(pod.Namespace).With(pod.Name).Info("CSI POD is created.")
+	return pod.Name
+}
+
+func (j *PVCTestJig) NewPodForCSICloneBlock(name string, namespace string, claimName string, adLabel string) string {
+	By("Creating a pod with the claiming PVC created by CSI")
+
+	pod, err := j.KubeClient.CoreV1().Pods(namespace).Create(context.Background(), &v1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: j.Name,
+			Namespace:    namespace,
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  name,
+					Image: nginx,
+					VolumeDevices: []v1.VolumeDevice{
+						{
+							Name:       "persistent-storage",
+							DevicePath: "/dev/xvda",
 						},
 					},
 				},
@@ -1336,7 +1455,39 @@ func (j *PVCTestJig) CheckMultiplePodReadWrite(namespace string, pvcName string,
 	j.NewPodForCSIFSSRead(string(uuid2), namespace, pvcName, fileName, checkEncryption)
 }
 
+type PodCommands struct {
+	podRunning       string
+	dataWritten      string
+	write            string
+	read             string
+	isRawBlockVolume bool
+}
+
 func (j *PVCTestJig) CheckDataPersistenceWithDeployment(pvcName string, ns string) {
+	dataWritten := "Data written"
+	commands := PodCommands{
+		podRunning:       " while true; do true; done;",
+		dataWritten:      dataWritten,
+		write:            "echo \"" + dataWritten + "\" >> /data/out.txt;",
+		read:             "cat /data/out.txt",
+		isRawBlockVolume: false,
+	}
+	j.CheckDataPersistenceWithDeploymentImpl(pvcName, ns, commands)
+}
+
+func (j *PVCTestJig) CheckDataPersistenceForRawBlockVolumeWithDeployment(pvcName string, ns string) {
+	dataWritten := "Hello CSI Tester for RBV"
+	commands := PodCommands{
+		podRunning:       " while true; do true; done;",
+		dataWritten:      dataWritten,
+		write:            "echo \"" + dataWritten + "\" > /tmp/test.txt; dd if=/tmp/test.txt of=/dev/xvda count=1;",
+		read:             "dd if=/dev/xvda bs=512 count=1",
+		isRawBlockVolume: true,
+	}
+	j.CheckDataPersistenceWithDeploymentImpl(pvcName, ns, commands)
+}
+
+func (j *PVCTestJig) CheckDataPersistenceWithDeploymentImpl(pvcName string, ns string, podCommands PodCommands) {
 	nodes, err := j.KubeClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 
 	if err != nil {
@@ -1351,16 +1502,10 @@ func (j *PVCTestJig) CheckDataPersistenceWithDeployment(pvcName string, ns strin
 	schedulableNodeFound := false
 
 	for _, node := range nodes.Items {
-		taintIsMaster := false
 		if node.Spec.Unschedulable == false {
-			for _, taint := range node.Spec.Taints {
-				taintIsMaster = (taint.Key == "node-role.kubernetes.io/master" || taint.Key == "node-role.kubernetes.io/control-plane")
-			}
-			if !taintIsMaster {
-				schedulableNodeFound = true
-				nodeSelectorLabels = node.Labels
-				break
-			}
+			schedulableNodeFound = true
+			nodeSelectorLabels = node.Labels
+			break
 		}
 	}
 
@@ -1370,13 +1515,8 @@ func (j *PVCTestJig) CheckDataPersistenceWithDeployment(pvcName string, ns strin
 
 	podRunningCommand := " while true; do true; done;"
 
-	dataWritten := "Data written"
-
-	writeCommand := "echo \"" + dataWritten + "\" >> /data/out.txt;"
-	readCommand := "cat /data/out.txt"
-
 	By("Creating a deployment")
-	deploymentName := j.createDeploymentOnNodeAndWait(podRunningCommand, pvcName, ns, "data-persistence-deployment", 1, nodeSelectorLabels)
+	deploymentName := j.createDeploymentOnNodeAndWait(podRunningCommand, pvcName, ns, "data-persistence-deployment", 1, nodeSelectorLabels, podCommands.isRawBlockVolume)
 
 	deployment, err := j.KubeClient.AppsV1().Deployments(ns).Get(context.Background(), deploymentName, metav1.GetOptions{})
 
@@ -1394,7 +1534,7 @@ func (j *PVCTestJig) CheckDataPersistenceWithDeployment(pvcName string, ns strin
 	podName := pods.Items[0].Name
 
 	By("Writing to the volume using the pod")
-	_, err = RunHostCmd(ns, podName, writeCommand)
+	_, err = RunHostCmd(ns, podName, podCommands.write)
 
 	if err != nil {
 		Failf("Error executing write command a pod: %v", err)
@@ -1430,14 +1570,14 @@ func (j *PVCTestJig) CheckDataPersistenceWithDeployment(pvcName string, ns strin
 	podName = pods.Items[0].Name
 
 	By("Reading from the volume using the pod and checking data integrity")
-	output, err := RunHostCmd(ns, podName, readCommand)
+	output, err := RunHostCmd(ns, podName, podCommands.read)
 
 	if err != nil {
 		Failf("Error executing write command a pod: %v", err)
 	}
 
-	if dataWritten != strings.TrimSpace(output) {
-		Failf("Written data not found on the volume, written: %v, found: %v", dataWritten, strings.TrimSpace(output))
+	if !strings.Contains(strings.TrimSpace(output), podCommands.dataWritten) {
+		Failf("Written data not found on the volume, written: %v, found: %v\n", podCommands.dataWritten, strings.TrimSpace(output))
 	}
 
 }

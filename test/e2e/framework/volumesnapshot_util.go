@@ -17,8 +17,9 @@ package framework
 import (
 	"context"
 	"fmt"
-	ocicore "github.com/oracle/oci-go-sdk/v65/core"
 	"time"
+
+	ocicore "github.com/oracle/oci-go-sdk/v65/core"
 
 	snapshot "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo"
@@ -197,14 +198,14 @@ func (j *PVCTestJig) GetBackupIDFromSnapshot(vsName string, ns string) string {
 
 // CreateVolumeSnapshotContentOrFail creates a new volume snapshot content based on the jig's defaults.
 func (j *PVCTestJig) CreateVolumeSnapshotContentOrFail(name string, driverType string,
-	backupOCID string, deletionPolicy string, vsName string, ns string) string {
+	backupOCID string, deletionPolicy string, vsName string, ns string, volumeMode v1.PersistentVolumeMode) string {
 
 	snapshotDeletionPolicy := snapshot.VolumeSnapshotContentDelete
 	if deletionPolicy == "Retain" {
 		snapshotDeletionPolicy = snapshot.VolumeSnapshotContentRetain
 	}
 
-	contentTemp := j.NewVolumeSnapshotContentTemplate(name, backupOCID, driverType, snapshotDeletionPolicy, vsName, ns)
+	contentTemp := j.NewVolumeSnapshotContentTemplate(name, backupOCID, driverType, volumeMode, snapshotDeletionPolicy, vsName, ns)
 
 	content, err := j.SnapClient.SnapshotV1().VolumeSnapshotContents().Create(context.Background(), contentTemp, metav1.CreateOptions{})
 	if err != nil {
@@ -221,7 +222,7 @@ func (j *PVCTestJig) CreateVolumeSnapshotContentOrFail(name string, driverType s
 // does not actually create the storage content. The default storage content has the same name
 // as the jig
 func (j *PVCTestJig) NewVolumeSnapshotContentTemplate(name string, backupOCID string,
-	driverType string, deletionPolicy snapshot.DeletionPolicy, vsName string, ns string) *snapshot.VolumeSnapshotContent {
+	driverType string, volumeMode v1.PersistentVolumeMode, deletionPolicy snapshot.DeletionPolicy, vsName string, ns string) *snapshot.VolumeSnapshotContent {
 	return &snapshot.VolumeSnapshotContent{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "VolumeSnapshotContent",
@@ -236,6 +237,7 @@ func (j *PVCTestJig) NewVolumeSnapshotContentTemplate(name string, backupOCID st
 			Source: snapshot.VolumeSnapshotContentSource{
 				SnapshotHandle: &backupOCID,
 			},
+			SourceVolumeMode: &volumeMode,
 			VolumeSnapshotRef: v1.ObjectReference{
 				Name:      vsName,
 				Namespace: ns,

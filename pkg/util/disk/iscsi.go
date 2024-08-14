@@ -109,6 +109,8 @@ type Interface interface {
 	GetDiskFormat(devicePath string) (string, error)
 
 	WaitForPathToExist(path string, maxRetries int) bool
+
+	UnmountDeviceBindAndDelete(path string) error
 }
 
 // iSCSIMounter implements Interface.
@@ -396,6 +398,10 @@ func (c *iSCSIMounter) FormatAndMount(source string, target string, fstype strin
 	return formatAndMount(source, target, fstype, options, safeMounter)
 }
 
+func (c *iSCSIMounter) UnmountDeviceBindAndDelete(path string) error {
+	return UnmountFileAndDelete(c.logger, path, c.mounter)
+}
+
 func formatAndMount(source string, target string, fstype string, options []string, sm *mount.SafeFormatAndMount) error {
 	return sm.FormatAndMount(source, target, fstype, options)
 }
@@ -483,6 +489,51 @@ func diskByPathsForMountPoint(mountPoint mount.MountPoint) ([]string, error) {
 	if len(diskByPaths) == 0 {
 		return nil, errors.New("disk by path link not found")
 	}
+	return diskByPaths, nil
+}
+
+// Gets the diskPath for a bind-mounted device file
+func GetDiskPathFromBindDeviceFilePath(logger *zap.SugaredLogger, mountPath string) ([]string, error) {
+	// Get the block device for the given mount path
+	devices, err := FindMount(mountPath)
+
+	if err != nil {
+		logger.With(zap.Error(err)).Warn("Unable to get block device for mount path")
+		return nil, err
+	}
+
+	var sanitizedDevices []string
+	for _, dev := range devices {
+		sanitizedDevice := strings.TrimPrefix(dev, "devtmpfs[")
+		sanitizedDevice = strings.TrimSuffix(sanitizedDevice, "]")
+		sanitizedDevice = strings.TrimPrefix(sanitizedDevice, "/dev/")
+		sanitizedDevice = filepath.Clean(sanitizedDevice) // Fix extra slashes
+		sanitizedDevices = append(sanitizedDevices, sanitizedDevice)
+	}
+
+	if len(sanitizedDevices) != 1 {
+		logger.Warn("Found multiple or no block devices for the mount path")
+		return nil, errors.New("did not find exactly a single block device on " + mountPath)
+	}
+
+	deviceName := sanitizedDevices[0]
+
+	// Convert the device name to the correct path format
+	devicePath := filepath.Join("/dev", deviceName)
+
+	// Create a mount.MountPoint struct
+	mountPoint := mount.MountPoint{
+		Path:   mountPath,
+		Device: devicePath,
+	}
+
+	// Use the device path to get diskByPaths
+	diskByPaths, err := diskByPathsForMountPoint(mountPoint)
+	if err != nil {
+		logger.With(zap.Error(err)).Warn("Unable to find diskByPaths for device")
+		return nil, err
+	}
+
 	return diskByPaths, nil
 }
 

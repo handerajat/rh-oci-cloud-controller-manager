@@ -229,23 +229,18 @@ func (d *BlockVolumeControllerDriver) CreateVolume(ctx context.Context, req *csi
 		return nil, status.Error(codes.InvalidArgument, "CreateVolume Name must be provided")
 	}
 
+	availableDomainShortName := ""
+	volumeName := req.Name
+	dimensionsMap := make(map[string]string)
+
 	if req.VolumeCapabilities == nil || len(req.VolumeCapabilities) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "VolumeCapabilities must be provided in CreateVolumeRequest")
-	}
-
-	if err := d.validateCapabilities(req.VolumeCapabilities); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	size, err := csi_util.ExtractStorage(req.CapacityRange)
 	if err != nil {
 		return nil, status.Errorf(codes.OutOfRange, "invalid capacity range: %v", err)
 	}
-
-	availableDomainShortName := ""
-	volumeName := req.Name
-
-	dimensionsMap := make(map[string]string)
 
 	volumeParams, err := extractVolumeParameters(log, req.GetParameters())
 	if err != nil {
@@ -254,6 +249,10 @@ func (d *BlockVolumeControllerDriver) CreateVolume(ctx context.Context, req *csi
 		dimensionsMap[metrics.ComponentDimension] = metricDimension
 		metrics.SendMetricData(d.metricPusher, metrics.PVProvision, time.Since(startTime).Seconds(), dimensionsMap)
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse storageclass parameters %v", err)
+	}
+
+	if err := d.validateCapabilities(req.VolumeCapabilities, volumeParams); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	dimensionsMap[metrics.ResourceOCIDDimension] = volumeName
@@ -952,7 +951,7 @@ func (d *BlockVolumeControllerDriver) ControllerGetCapabilities(ctx context.Cont
 
 // validateCapabilities validates the requested capabilities. It returns an error
 // if it doesn't satisfy the currently supported modes of OCI Block Volume
-func (d *BlockVolumeControllerDriver) validateCapabilities(caps []*csi.VolumeCapability) error {
+func (d *BlockVolumeControllerDriver) validateCapabilities(caps []*csi.VolumeCapability, volumeParams VolumeParameters) error {
 	vcaps := []*csi.VolumeCapability_AccessMode{supportedAccessMode}
 
 	hasSupport := func(mode csi.VolumeCapability_AccessMode_Mode) bool {
@@ -965,9 +964,9 @@ func (d *BlockVolumeControllerDriver) validateCapabilities(caps []*csi.VolumeCap
 	}
 
 	for _, cap := range caps {
-		if blk := cap.GetBlock(); blk != nil {
-			d.logger.Error("volumeMode is set to Block which is not supported.")
-			return fmt.Errorf("driver does not support Block volumeMode. Please use Filesystem mode")
+		if blk := cap.GetBlock(); blk != nil && volumeParams.vpusPerGB > 30 {
+			d.logger.Error("volumeMode is set to Block for an Ultra High Performance Volume, which is not supported")
+			return fmt.Errorf("driver does not support Block volumeMode for Ultra High Performance Volumes (vpusPerGB > 30)")
 		}
 		if hasSupport(cap.AccessMode.Mode) {
 			continue
