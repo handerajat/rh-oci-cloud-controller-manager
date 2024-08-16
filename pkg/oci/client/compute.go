@@ -236,14 +236,12 @@ func (c *client) GetInstanceByNodeName(ctx context.Context, compartmentID, vcnID
 	if err == nil {
 		return instance, nil
 	}
-
 	logger := c.logger.With("nodeName", nodeName, "compartmentID", compartmentID)
 
 	// Otherwise fall back to looking up via VNiC properties (hostname or public IP).
-	var (
-		page      *string
-		instances []*core.Instance
-	)
+	var page *string
+	instances := make(map[string]*core.Instance)
+
 	for {
 		resp, err := c.listVNICAttachments(ctx, core.ListVnicAttachmentsRequest{
 			CompartmentId:   &compartmentID,
@@ -283,6 +281,7 @@ func (c *client) GetInstanceByNodeName(ctx context.Context, compartmentID, vcnID
 			if (vnic.PublicIp != nil && *vnic.PublicIp == nodeName) ||
 				(vnic.PrivateIp != nil && *vnic.PrivateIp == nodeName) ||
 				(vnic.HostnameLabel != nil && (*vnic.HostnameLabel != "" && strings.HasPrefix(nodeName, *vnic.HostnameLabel))) {
+
 				instance, err := c.GetInstance(ctx, *attachment.InstanceId)
 				if err != nil {
 					return nil, err
@@ -293,8 +292,9 @@ func (c *client) GetInstanceByNodeName(ctx context.Context, compartmentID, vcnID
 						"lifecycleState", instance.LifecycleState).Warn("Instance in a terminal state")
 					continue
 				}
-
-				instances = append(instances, instance)
+				// Instances with multiple vics with the same host name label predix will cause the same instance to be added multiple times.
+				// Use map to maintaince unique instances.
+				instances[*instance.Id] = instance
 			}
 		}
 		if page = resp.OpcNextPage; resp.OpcNextPage == nil {
@@ -308,7 +308,10 @@ func (c *client) GetInstanceByNodeName(ctx context.Context, compartmentID, vcnID
 	if len(instances) > 1 {
 		return nil, errors.Errorf("too many instances returned for node name %q: %d", nodeName, len(instances))
 	}
-	return instances[0], nil
+	for _, instance := range instances {
+		return instance, nil
+	}
+	return nil, nil
 }
 
 // IsInstanceInTerminalState returns true if the instance is in a terminal state, false otherwise.

@@ -30,6 +30,12 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 )
 
+const (
+	OpenShiftTagNamesapcePrefix = "openshift-"
+	OpenShiftBootVolumeType     = "boot-volume-type"
+	OpenShiftBootVolumeISCSI    = "ISCSI"
+)
+
 var _ cloudprovider.Instances = &CloudProvider{}
 
 const (
